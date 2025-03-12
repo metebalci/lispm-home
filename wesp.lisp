@@ -33,13 +33,23 @@
 
 (defun %unibus-map-array (arr)
   "maps arr to unibus mapping, returns the offset to be used from #o140000"
-  (let* ((vadr-real (%pointer arr))
-         (vadr (- vadr-real (ldb (byte 8 0) vadr-real)))
-         (n-pages (ceiling (+ 1
-                              (%p-ldb sys:%%array-long-length-flag arr)
-                              (ceiling (array-length arr) 4))
-                           si:page-size)))
-    (when *wesp-debug-unibus-mapping* (format t "~%vadr: #o~O vadr-real: #o~O~%" vadr vadr-real))
+  (let* ((vadr-real (%pointer arr)) ; actual address
+         (vadr (- vadr-real (ldb (byte 8 0) vadr-real))) ; page aligned address
+         (n-words (+ 1 ; 1 word header in the array
+                     (%p-ldb sys:%%array-long-length-flag arr) ; 1 word length if long length array
+                     (ceiling (array-length arr) 4))) ; ceil(num 1 byte elements / 4)
+         (vadr-real-last (+ vadr-real n-words)) ; actual last word address
+         (vadr-last (- vadr-real-last (ldb (byte 8 0) vadr-real-last))) ; page aligned last word address
+         (vadr-last+1 (+ vadr-last si:page-size)) ; next page aligned last word address (covering the last word)
+         ;; n-pages is minimum 1, for example it is 2 if array spans two pages even though it is smaller than a page
+         (n-pages (lsh (- vadr-last+1 vadr) -8)))
+    (when *wesp-debug-unibus-mapping*
+          (format t
+              "~%vadr-real: #o~O vadr-aligned: #o~O vadr-last+1: #o~O n-pages: ~D~%"
+            vadr-real
+            vadr
+            vadr-last+1
+            n-pages))
     (do ((i 0 (1+ i)) (adr vadr (+ adr si:page-size))) ((= i n-pages))
       (si:wire-page adr)
       (%unibus-map-vadr i adr))
@@ -58,14 +68,21 @@
     (do ((i 0 (1+ i)) (adr vadr (+ adr si:page-size))) ((= i n-pages))
       (%unibus-write (+ #o766140 (* i 2)) 0)
       (si:unwire-page adr)
-      (when *wesp-debug-unibus-mapping* (format t "~%unibus-unmap-page: ~D~%" i))))
+      (when *wesp-debug-unibus-mapping*
+            (format t "unibus-unmap-page: ~D~%" i))))
   t)
 
 (defun %unibus-map-vadr (unibus-map-page vadr)
   "setup unibus map so that unibus-map-page maps to the page of vadr, vadr has to be wired"
   (let* ((padr (sys:%physical-address vadr))
          (page-no (lsh padr -8)))
-    (when *wesp-debug-unibus-mapping* (format t "~%unibus-map-page: ~D vadr: #x~X padr: #x~X page-no: #o~O~%" unibus-map-page vadr padr page-no))
+    (when *wesp-debug-unibus-mapping*
+          (format t
+              "unibus-map-page: ~D vadr: #x~X padr: #x~X page-no: #o~O~%"
+            unibus-map-page
+            vadr
+            padr
+            page-no))
     (%unibus-write (+ #o766140 (* unibus-map-page 2))
                    (dpb #b11 (byte 2 14) page-no)))
   t)
@@ -230,7 +247,7 @@
          (if (not (= (aref arr1 i) (aref arr2 i))) (return t))) nil)
       (t)))
 
-(defun %wesp-test-write-read-p (&key (count 256))
+(defun %wesp-test-write-read-compare-p (&key (count 256))
    (let* ((arr-to-write (wesp-make-array count))
           (arr-to-read (wesp-make-array count)))
         (wesp-fill-array-orderly arr-to-write)
@@ -240,16 +257,16 @@
         (wesp-read arr-to-read)
         (arrays-equal arr-to-write arr-to-read)))
 
-(defun wesp-test-write-read (&key (unit 0))
+(defun wesp-test-write-read-compare (&key (unit 0) (start 4) (times 12))
   (fresh-line)
   (wesp-select-unit unit)
   (format t "Testing tape unit ~D with different record sizes...~%" unit)
-  (dotimes (i 12)
-    (let ((count (lsh 4 i)))
+  (dotimes (i times)
+    (let ((count (lsh start i)))
       (format t "~D " count)
       (catch-all
        (unwind-protect
-           (if (%wesp-test-write-read-p :count count)
+           (if (%wesp-test-write-read-compare-p :count count)
                (format t "OK")
                (format t "read != write"))
          (fresh-line)))))
