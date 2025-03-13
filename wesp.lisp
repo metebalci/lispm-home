@@ -135,6 +135,9 @@
 (defun %wesp-mts-selr-p ()
   (ldb-test (byte 1 6) (%wesp-mts)))
 
+(defun %wesp-mts-bot-p ()
+  (ldb-test (byte 1 5) (%wesp-mts)))
+
 (defun %wesp-mts-wrl-p ()
   (ldb-test (byte 1 2) (%wesp-mts)))
 
@@ -238,7 +241,8 @@
               (ferror nil "tape: non-recoverable (max retry)"))
           (incf retry-count)
           (wesp-space-rev))
-      (%unibus-unmap-array arr))))
+      (%unibus-unmap-array arr)))
+  t)
 
 (defun wesp-write (arr &key (unit 0))
   "execute Write command based on TC-131 Write Flow Chart"
@@ -268,7 +272,8 @@
           (incf retry-count)
           (wesp-space-rev))
       ; there is an erase in flow chart, what is that ? 
-      (%unibus-unmap-array arr))))
+      (%unibus-unmap-array arr)))
+  t)
 
 (defun wesp-write-eof (&key (unit 0))
   "execute Write EOF command based on TC-131 Write EOF Flow Chart"
@@ -435,4 +440,34 @@
     (assert (%wesp-test-arrays-equal-p buffer f2r1) ()
         "error reading file-2:record-1")
     (format t "Test completed with success.~%"))
+  t)
+
+(defun wesp-test-space-ops (&key (unit 0))
+  (fresh-line)
+  (format t "Testing tape unit ~D for space operations...~%" unit)
+  (format t "Testing moving back beyond the beginning of tape...~&")
+  (wesp-rewind :unit unit)
+  (assert (%wesp-mts-bot-p) () "bot not set after rewind")
+  ; these should not crash
+  (wesp-space-rev 0 :unit unit)
+  (wesp-space-rev 1 :unit unit)
+  (assert (%wesp-mts-bot-p) () "bot not set after space-rev")
+  (comment
+   (format t "Testing moving forward beyond the end of tape...~&")
+   (let ((arr (%wesp-test-fill-array-orderly (wesp-make-array 4096))))
+     (do () (nil)
+       (wesp-write arr :unit unit)
+       (when (%wesp-mts-eot-p) (return))))
+    ; these should not crash
+    (wesp-space-for 0 :unit unit)
+    (assert (%wesp-mts-eot-p) () "eot not set after space-for")
+    (wesp-space-for 1 :unit unit)
+    (assert (%wesp-mts-eot-p) () "eot not set after space-for"))
+  (format t "Test completed with success.~%")
+  t)
+
+(defun wesp-test-all (&key (unit 0))
+  (wesp-test-records :unit unit)
+  (wesp-test-files :unit unit)
+  (wesp-test-space-ops :unit unit)
   t)
