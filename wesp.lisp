@@ -286,21 +286,21 @@
     (ferror nil "tape: fatal error"))
   t)
 
-(defun wesp-space-for (&key (unit 0) (count 1))
+(defun wesp-space-for (count &key (unit 0))
   "execute Space Forward command based on TC-131 Space Forward/Reverse Flow Chart"
   (%wesp-wait-controller-ready)
   (%wesp-select-unit unit)
   (%wesp-wait-unit-ready)
-  (%wesp-mtbrc -count)
+  (%wesp-mtbrc (- count))
   (%wesp-go *wesp-command-space-for*)
   t)
 
-(defun wesp-space-rev (&key (unit 0) (count 1))
+(defun wesp-space-rev (count &key (unit 0))
   "execute Space Reverse command based on TC-131 Space Forward/Reverse Flow Chart"
   (%wesp-wait-controller-ready)
   (%wesp-select-unit unit)
   (%wesp-wait-unit-ready)
-  (%wesp-mtbrc -count)
+  (%wesp-mtbrc (- count))
   (%wesp-go *wesp-command-space-rev*)
   t)
 
@@ -328,7 +328,7 @@
   arr)
 
 (defun %wesp-test-arrays-equal-p (arr1 arr2)
-  (assert (array-length arr1) (array-length arr2))
+  (assert (= (array-length arr1) (array-length arr2)) () "array lengths do not match")
   (dotimes (i (array-length arr1))
     (if (not (eql (aref arr1 i) (aref arr2 i)))
         (return-from %wesp-test-arrays-equal-p nil)))
@@ -348,54 +348,91 @@
       (wesp-write arr-to-write :unit unit)
       (wesp-rewind :unit unit)
       (wesp-read arr-to-read :unit unit)
-      (if (%wesp-test-arrays-equal-p arr-to-write arr-to-read)
-          (format t "OK~%")
-          (format t "failed~%")))))
+      (assert (%wesp-test-arrays-equal-p arr-to-write arr-to-read) ()
+              "write-read-compare failed at record-length: ~D bytes" record-length)))
+  (format t "~%Test completed with success.~%")
+  t)
 
-(defun wesp-test-files (&key (unit 0) (record-size 8))
+(defun wesp-test-files (&key (unit 0) (record-size 4096))
   (fresh-line)
-  (%wesp-select-unit unit)
-  (format t "Testing tape unit ~D...~%" unit)
+  (format t "Testing tape unit ~D with files...~%" unit)
   (format t "Preparing buffers...~%")
-  (let ((record-1 (%wesp-test-fill-array-with (wesp-make-array record-size) (char-int 1)))
-        (record-2 (%wesp-test-fill-array-with (wesp-make-array record-size) (char-int 2)))
-        (record-3 (%wesp-test-fill-array-with (wesp-make-array record-size) (char-int 3)))
-        (record-4 (%wesp-test-fill-array-with (wesp-make-array record-size) (char-int 4)))
+  ;; two files f1 and f2, each file has two records
+  ;; buffer holds what is read back
+  (let ((f1r1 (%wesp-test-fill-array-with (wesp-make-array record-size) (char-int 1)))
+        (f1r2 (%wesp-test-fill-array-with (wesp-make-array record-size) (char-int 2)))
+        (f2r1 (%wesp-test-fill-array-with (wesp-make-array record-size) (char-int 3)))
+        (f2r2 (%wesp-test-fill-array-with (wesp-make-array record-size) (char-int 4)))
         (buffer (wesp-make-array record-size)))
     (wesp-rewind :unit unit)
+    ;; write file-1
     (format t "Writing file-1 to tape...~%")
-    (wesp-write record-1 :unit unit)
-    (wesp-write record-2 :unit unit)
+    (wesp-write f1r1 :unit unit)
+    (wesp-write f1r2 :unit unit)
     (wesp-write-eof :unit unit)
+    ;; write file-2
     (format t "Writing file-2 to tape...~%")
-    (wesp-write record-3 :unit unit)
-    (wesp-write record-4 :unit unit)
+    (wesp-write f2r1 :unit unit)
+    (wesp-write f2r2 :unit unit)
     (wesp-write-eof :unit unit)
-    ;; read-compare
+    ;; read-compare files
     (wesp-rewind :unit unit)
-    (wesp-read buffer :unit unit)
-    (%wesp-test-assert-arrays-equal buffer record-1)
-    (wesp-read buffer :unit unit)
-    (if (not (%wesp-mts-eof-p))
-        (format t "cannot find file-1 eof~%"))
-
+    ;; read-compare file-1
+    (defun test-file-1-and-eof ()
+      (wesp-read buffer :unit unit)
+      (assert (%wesp-test-arrays-equal-p buffer f1r1) ()
+          "error reading file-1:record-1")
+      (wesp-read buffer :unit unit)
+      (assert (%wesp-test-arrays-equal-p buffer f1r2) ()
+          "error reading file-1:record-2")
+      (assert (%wesp-mts-eof-p) ()
+          "no EOF found after file-1"))
+    (format t "Testing the records of file-1 and EOF...~%")
+    (test-file-1-and-eof)
+    ;; read-compare file-2
+    (defun test-file-2-and-eof () 
+      (wesp-read buffer :unit unit)
+      (assert (%wesp-test-arrays-equal-p buffer f2r1) ()
+          "error reading file-2:record-1")
+      (wesp-read buffer :unit unit)
+      (assert (%wesp-test-arrays-equal-p buffer f2r2) ()
+          "error reading file-2:record-2")
+      (assert (%wesp-mts-eof-p) ()
+          "no EOF found after file-2"))
+    (format t "Testing the records of file-2 and EOF...~%")
+    (test-file-2-and-eof)
+    ;; skip file-1/record-1 and read record-2
+    (format t "Testing skipping file-1:record-1 (space forward 1) and reading file-1:record-2...~%")
     (wesp-rewind :unit unit)
+    (wesp-space-for 1)
     (wesp-read buffer :unit unit)
-    (wesp-read buffer :unit unit)
-    (if (not (%wesp-mts-eof-p))
-        (format t "cannot find file-2 eof~%"))
-
-    ;; rewind then space one to read file-1/record-2
-    (wesp-rewind :unit unit)
-    (wesp-space-for 1 :unit unit)
-
-    ;; rewind then space 0 (max, filemark) to stop at eof
-    ;; then space 1 to read file-2/record-4
+    (assert (%wesp-test-arrays-equal-p buffer f1r2) ()
+        "error reading file-1:record-2")
+    (assert (%wesp-mts-eof-p) ()
+        "no EOF found after file-1")
+    ;; skip file-1 and read-compare file-2
+    (format t "Testing skipping file-1 (space forward 0) and reading file-2...~%")
     (wesp-rewind :unit unit)
     (wesp-space-for 0 :unit unit)
-    (if (not (%wesp-mts-eof-p))
-        (format t "cannot find eof after space 0~%"))
-    (wesp-space-for 1 :unit unit)
-
-    (format t "Test completed.~%"))
+    (test-file-2-and-eof)
+    ;; skip end of file-2 (space reverse 1) and read record-1
+    (format t "Testing skipping reverse from end of file-2 (space reverse 2) and reading file-2:record-1...~%")
+    (wesp-space-rev 2 :unit unit)
+    (wesp-read buffer :unit unit)
+    (assert (%wesp-test-arrays-equal-p buffer f2r1) ()
+        "error reading file-2:record-1")
+    ;; go to end of file-2 (2x space forward 0), then go back to start of file-2 (space reverse 0)
+    (format t "Testing skipping both files (2x space forward 0) then skipping reverse to start of file-2 (space reverse 0) and reading file-2:record-1...~%")
+    (wesp-rewind :unit unit)
+    ;; skip file-1
+    (wesp-space-for 0 :unit unit)
+    ;; skip file-2
+    (wesp-space-for 0 :unit unit)
+    ;; go back to file-2
+    (wesp-space-rev 0 :unit unit)
+    ;; read file-2:record-1
+    (wesp-read buffer :unit unit)
+    (assert (%wesp-test-arrays-equal-p buffer f2r1) ()
+        "error reading file-2:record-1")
+    (format t "Test completed with success.~%"))
   t)
