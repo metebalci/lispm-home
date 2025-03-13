@@ -15,34 +15,22 @@
 (defconstant *wesp-command-rewind* 7)
 
 (defparameter *wesp-debug-unibus-mapping* nil)
+(defparameter *wesp-max-retry-count* 0 "retry count of read and write operations, 0 means no retry, execute read/write only once")
 
-(defun wesp-print-array (arr)
-  (fresh-line)
-  (dotimes (i (array-length arr)) (format t "~2,'0x " (aref arr i)))
-  nil)
-
-(defun wesp-fill-array-orderly (arr &key (from 0) (to 256))
-  (dotimes (i (array-length arr)) (aset (+ (mod i (- to from)) from) arr i))
-  arr)
-
-(defun wesp-make-array (len)
-  (make-array len :type art-8b))
-
-(defconstant *wesp-test-array*
-             (wesp-fill-array-orderly (wesp-make-array 256)))
+;;; ARRAY-UNIBUS MAPPING FUNCTIONS
 
 (defun %unibus-map-array (arr)
   "maps arr to unibus mapping, returns the offset to be used from #o140000"
   (let* ((vadr-real (%pointer arr)) ; actual address
-         (vadr (- vadr-real (ldb (byte 8 0) vadr-real))) ; page aligned address
-         (n-words (+ 1 ; 1 word header in the array
-                     (%p-ldb sys:%%array-long-length-flag arr) ; 1 word length if long length array
-                     (ceiling (array-length arr) 4))) ; ceil(num 1 byte elements / 4)
-         (vadr-real-last (+ vadr-real n-words)) ; actual last word address
-         (vadr-last (- vadr-real-last (ldb (byte 8 0) vadr-real-last))) ; page aligned last word address
-         (vadr-last+1 (+ vadr-last si:page-size)) ; next page aligned last word address (covering the last word)
-         ;; n-pages is minimum 1, for example it is 2 if array spans two pages even though it is smaller than a page
-         (n-pages (lsh (- vadr-last+1 vadr) -8)))
+                                   (vadr (- vadr-real (ldb (byte 8 0) vadr-real))) ; page aligned address
+                                   (n-words (+ 1 ; 1 word header in the array
+                                               (%p-ldb sys:%%array-long-length-flag arr) ; 1 word length if long length array
+                                               (ceiling (array-length arr) 4))) ; ceil(num 1 byte elements / 4)
+                                   (vadr-real-last (+ vadr-real n-words)) ; actual last word address
+                                   (vadr-last (- vadr-real-last (ldb (byte 8 0) vadr-real-last))) ; page aligned last word address
+                                   (vadr-last+1 (+ vadr-last si:page-size)) ; next page aligned last word address (covering the last word)
+                                   ;; n-pages is minimum 1, for example it is 2 if array spans two pages even though it is smaller than a page
+                                   (n-pages (lsh (- vadr-last+1 vadr) -8)))
     (when *wesp-debug-unibus-mapping*
           (format t
               "~%vadr-real: #o~O vadr-aligned: #o~O vadr-last+1: #o~O n-pages: ~D~%"
@@ -87,222 +75,327 @@
                    (dpb #b11 (byte 2 14) page-no)))
   t)
 
-(defun wesp-mts (&optional value)
+
+
+;;; REGISTER ACCESS FUNCTIONS
+
+(defun %wesp-mts (&optional value)
+  "read/write MTS (STATUS) register"
   (cond
    (value (%unibus-write *wesp-mts-addr* value))
    (t (%unibus-read *wesp-mts-addr*))))
 
-(defun wesp-mtc (&optional value)
+(defun %wesp-mtc (&optional value)
+  "read/write MTC (COMMAND) register"
   (cond
    (value (%unibus-write *wesp-mtc-addr* value))
    (t (%unibus-read *wesp-mtc-addr*))))
 
-(defun wesp-mtbrc (&optional value)
+(defun %wesp-mtbrc (&optional value)
+  "read/write MTBRC (BYTE/RECORD COUNT) register"
   (cond
    (value (%unibus-write *wesp-mtbrc-addr* value))
    (t (%unibus-read *wesp-mtbrc-addr*))))
 
-(defun wesp-mtcma (&optional value)
+(defun %wesp-mtcma (&optional value)
+  "read/write MTCMA (CURRENT MEMORY ADDRESS) register"
   (cond
    (value (%unibus-write *wesp-mtcma-addr* value))
    (t (%unibus-read *wesp-mtcma-addr*))))
 
-(defun wesp-controller-ready-p ()
-  (ldb-test (byte 1 7) (wesp-mtc)))
+;;; REGISTER BIT FIELD PREDICATES
 
-(defun wesp-unit-ready-p ()
-  (ldb-test (byte 1 0) (wesp-mts)))
+(defun %wesp-mtc-cur-p ()
+  (ldb-test (byte 1 7) (%wesp-mtc)))
 
-(defun wesp-wait-controller-ready ()
-  (or (wesp-controller-ready-p)
-      (process-wait "tape ctrl" #'wesp-controller-ready-p))
+(defun %wesp-mts-ilc-p ()
+  (ldb-test (byte 1 15) (%wesp-mts)))
+
+(defun %wesp-mts-eof-p ()
+  (ldb-test (byte 1 14) (%wesp-mts)))
+
+(defun %wesp-mts-pae-p ()
+  (ldb-test (byte 1 12) (%wesp-mts)))
+
+(defun %wesp-mts-bgl-p ()
+  (ldb-test (byte 1 11) (%wesp-mts)))
+
+(defun %wesp-mts-eot-p ()
+  (ldb-test (byte 1 10) (%wesp-mts)))
+
+(defun %wesp-mts-rle-p ()
+  (ldb-test (byte 1 9) (%wesp-mts)))
+
+(defun %wesp-mts-bte-p ()
+  (ldb-test (byte 1 8) (%wesp-mts)))
+
+(defun %wesp-mts-nxm-p ()
+  (ldb-test (byte 1 7) (%wesp-mts)))
+
+(defun %wesp-mts-selr-p ()
+  (ldb-test (byte 1 6) (%wesp-mts)))
+
+(defun %wesp-mts-wrl-p ()
+  (ldb-test (byte 1 2) (%wesp-mts)))
+
+(defun %wesp-mts-tur-p ()
+  (ldb-test (byte 1 0) (%wesp-mts)))
+
+;;; WAIT FUNCTIONS
+
+(defun %wesp-wait-controller-ready ()
+  (or (%wesp-mtc-cur-p)
+      (process-wait "tape ctrl" #'%wesp-mtc-cur-p))
   nil)
 
-(defun wesp-wait-unit-ready ()
-  (or (wesp-unit-ready-p)
-      (process-wait "tape unit" #'wesp-unit-ready-p))
+(defun %wesp-wait-unit-ready ()
+  (or (%wesp-mts-tur-p)
+      (process-wait "tape unit" #'%wesp-mts-tur-p))
   nil)
 
-(defun wesp-mtc-err-p ()
-  (ldb-test (byte 1 15) (wesp-mtc)))
+;;; HELPER FUNCTIONS FOR OPERATIONS
 
-(defun wesp-mts-ilc-p ()
-  (ldb-test (byte 1 15) (wesp-mts)))
-
-(defun wesp-mts-eof-p ()
-  (ldb-test (byte 1 14) (wesp-mts)))
-
-(defun wesp-mts-eot-p ()
-  (ldb-test (byte 1 10) (wesp-mts)))
-
-(defun wesp-mts-rle-p ()
-  (ldb-test (byte 1 9) (wesp-mts)))
-
-(defun wesp-mts-bte-p ()
-  (ldb-test (byte 1 8) (wesp-mts)))
-
-(defun wesp-mts-nxm-p ()
-  (ldb-test (byte 1 7) (wesp-mts)))
-
-(defun wesp-mts-not-selr-p ()
-  (not (ldb-test (byte 1 6) (wesp-mts))))
-
-(defun throw-error-on-mtc-err ()
-  (when (wesp-mtc-err-p)
-        (cond
-         ((wesp-mts-ilc-p) (throw 'ilc))
-         ((wesp-mts-eof-p) (throw 'eof))
-         ((wesp-mts-eot-p) (throw 'eot))
-         ((wesp-mts-rle-p) (throw 'rle))
-         ((wesp-mts-bte-p) (throw 'bte))
-         ((wesp-mts-nxm-p) (throw 'nxm))
-         (throw 'err))))
-
-(defun wesp-power-clear ()
-  (wesp-mtc (dpb 1 (byte 1 12) 0))
+(defun %wesp-select-unit (unit)
+  (%wesp-mtc (dpb unit (byte 3 8) (%wesp-mtc)))
+  (unless (%wesp-mts-selr-p) (ferror nil "unit ~D is not online" unit))
   t)
 
-(defun wesp-select-unit (unit)
-  (wesp-wait-controller-ready)
-  (wesp-mtc (dpb unit (byte 3 8) (wesp-mtc)))
-  (throw-error-on-mtc-err)
-  (when (wesp-mts-not-selr-p) (throw 'selr))
-  (wesp-wait-unit-ready)
-  t)
-
-(defun wesp-set-address (addr)
+(defun %wesp-set-address (addr)
   ; ea never becomes > 0 in lispm
   ; because unibus map address is maximum #o177777
   (let ((ea (ldb (byte 2 17) addr))
         (cma (ldb (byte 16 0) addr)))
-    (wesp-mtc (dpb ea (byte 2 4) (wesp-mtc)))
-    (wesp-mtcma cma))
+    (%wesp-mtc (dpb ea (byte 2 4) (%wesp-mtc)))
+    (%wesp-mtcma cma))
   t)
 
-(defun wesp-go (function)
+(defun %wesp-go (function)
   "go with the function"
-  (wesp-wait-controller-ready)
-  (wesp-wait-unit-ready)
-  (wesp-mtc (dpb 1 (byte 1 0) (dpb function (byte 3 1) (wesp-mtc))))
-  (throw-error-on-mtc-err)
-  (wesp-wait-unit-ready)
+  (%wesp-mtc (dpb 1 (byte 1 0) (dpb function (byte 3 1) (%wesp-mtc))))
   t)
+
+;;; NON-COMMAND PUBLIC FUNCTIONS
+
+(defun wesp-make-array (len)
+  "make an appropriate array for wesp read and write"
+  (make-array len :type art-8b))
 
 (defun wesp-available-units ()
+  "return the list of available tape units"
   (let ((available-units nil))
-    (dotimes (unit 8) (catch 'selr
-                        (wesp-select-unit unit)
-                        (setf available-units (cons unit available-units))))
+    (dotimes (unit 8)
+      ;; dont use wesp-select-unit, it ferrors if unit is not available
+      (%wesp-mtc (dpb unit (byte 3 8) (%wesp-mtc)))
+      (if (%wesp-mts-selr-p)
+          (setf available-units (cons unit available-units))))
     (reverse available-units)))
 
-(defun %wesp-rewind-or-offline (offline-p)
-  (if offline-p
-      (wesp-go *wesp-command-rewind-offline*)
-      (wesp-go *wesp-command-rewind*))
+(defun wesp-power-clear ()
+  "initiate power clear"
+  (%wesp-mtc (dpb 1 (byte 1 12) 0))
   t)
 
-(defun wesp-offline () 
-    (%wesp-rewind-or-offline t))
+;;; COMMAND PUBLIC FUNCTIONS
 
-(defun wesp-read (arr)
+(defun wesp-offline (&key (unit 0))
+  "execute Off Line command based on TC-131 Rewind Flow Char"
+  (%wesp-wait-controller-ready)
+  (%wesp-select-unit unit)
+  (%wesp-wait-unit-ready)
+  (%wesp-go *wesp-command-offline*)
+  t)
+
+;; if re-allocate-p is t, 
+;; the size of arr can be adjusted if record length error is encountered
+;; thus, it is important to use the returned value (in case arr is a new array)
+;; if re-allocate-p is nil, arr is not changed
+(defun wesp-read (arr &key (unit 0) (re-allocate-p nil))
+  "execute Read command based on TC-131 Read Flow Chart"
   (let* ((offset-from-page-start (%unibus-map-array arr))
          (cma (+ #o140000 offset-from-page-start)))
-    (wesp-set-address cma)
-    (wesp-mtbrc (- (array-length arr)))
     (unwind-protect
-        (wesp-go *wesp-command-read*)
-      (%unibus-unmap-array arr)))
-  (- (wesp-mtbrc) (array-length arr)))
+        (do ((retry-count 0)) (nil)
+          (%wesp-wait-controller-ready)
+          (%wesp-select-unit unit)
+          (%wesp-wait-unit-ready)
+          (when (%wesp-mts-wrl-p) (ferror nil "tape: operator error: tape ~D is write-locked" unit))
+          (%wesp-set-address cma)
+          (%wesp-mtbrc (- (array-length arr)))
+          (%wesp-go *wesp-command-read*)
+          (%wesp-wait-unit-ready)
+          (when (or (%wesp-mts-bgl-p)
+                    (%wesp-mts-nxm-p)
+                    (%wesp-mts-ilc-p))
+                (ferror nil "tape: fatal hardware error (data late, nxm or illegal)"))
+          (unless (or (%wesp-mts-pae-p)
+                      (%wesp-mts-bte-p))
+            (if (%wesp-mts-rle-p)
+                (if re-allocate-p
+                    (setf arr (adjust-array (lsh (array-length arr) 2)))
+                    (ferror nil "tape: arr is small (re-allocate memory)"))
+                (return-from wesp-read arr)))
+          (if (= retry-count *wesp-max-retry-count*)
+              (ferror nil "tape: non-recoverable (max retry)"))
+          (incf retry-count)
+          (wesp-space-rev))
+      (%unibus-unmap-array arr))))
 
-(defun wesp-write (arr)
+(defun wesp-write (arr &key (unit 0))
+  "execute Write command based on TC-131 Write Flow Chart"
   (let* ((offset-from-page-start (%unibus-map-array arr))
          (cma (+ #o140000 offset-from-page-start)))
-    (wesp-set-address cma)
-    (wesp-mtbrc (- (array-length arr)))
     (unwind-protect
-        (wesp-go *wesp-command-write*)
-      (%unibus-unmap-array arr)))
+        (do ((retry-count 0)) (nil)
+          (%wesp-wait-controller-ready)
+          (%wesp-select-unit unit)
+          (%wesp-wait-unit-ready)
+          (when (%wesp-mts-wrl-p) (ferror nil "tape: operator error: tape ~D is write-locked" unit))
+          (%wesp-set-address cma)
+          (%wesp-mtbrc (- (array-length arr)))
+          (if (= retry-count 0)
+              (%wesp-go *wesp-command-write*)
+              (%wesp-go *wesp-command-write-erg*))
+          (%wesp-wait-unit-ready)
+          (when (or (%wesp-mts-bgl-p)
+                    (%wesp-mts-nxm-p)
+                    (%wesp-mts-ilc-p))
+                (ferror nil "tape: fatal hardware error (data late, nxm or illegal)"))
+          (unless (or (%wesp-mts-pae-p)
+                      (%wesp-mts-bte-p))
+            (return-from wesp-write t))
+          (if (= retry-count *wesp-max-retry-count*)
+              (ferror nil "tape: fatal error (max retry)"))
+          (incf retry-count)
+          (wesp-space-rev))
+      ; there is an erase in flow chart, what is that ? 
+      (%unibus-unmap-array arr))))
+
+(defun wesp-write-eof (&key (unit 0))
+  "execute Write EOF command based on TC-131 Write EOF Flow Chart"
+  (%wesp-wait-controller-ready)
+  (%wesp-select-unit unit)
+  (%wesp-wait-unit-ready)
+  (when (%wesp-mts-wrl-p) (ferror nil "tape: operator error: tape ~D is write-locked" unit))
+  (%wesp-go *wesp-command-write-eof*)
+  (%wesp-wait-unit-ready)
+  (when (or (%wesp-mts-bgl-p)
+            (%wesp-mts-nxm-p)
+            (%wesp-mts-ilc-p))
+        (ferror nil "tape: fatal hardware error (bus late, nxm or illegal)"))
+  (unless (%wesp-mts-eof-p)
+    (ferror nil "tape: fatal error"))
   t)
 
-(defun wesp-write-eof ()
-  (wesp-go *wesp-command-write-eof*)
+(defun wesp-space-for (&key (unit 0) (count 1))
+  "execute Space Forward command based on TC-131 Space Forward/Reverse Flow Chart"
+  (%wesp-wait-controller-ready)
+  (%wesp-select-unit unit)
+  (%wesp-wait-unit-ready)
+  (%wesp-mtbrc -count)
+  (%wesp-go *wesp-command-space-for*)
   t)
 
-(defun wesp-space-for (&key (count 1))
-  (wesp-mtbrc count)
-  (wesp-go *wesp-command-space-for*)
+(defun wesp-space-rev (&key (unit 0) (count 1))
+  "execute Space Reverse command based on TC-131 Space Forward/Reverse Flow Chart"
+  (%wesp-wait-controller-ready)
+  (%wesp-select-unit unit)
+  (%wesp-wait-unit-ready)
+  (%wesp-mtbrc -count)
+  (%wesp-go *wesp-command-space-rev*)
   t)
 
-(defun wesp-space-rev (&key (count 1))
-  (wesp-mtbrc count)
-  (wesp-go *wesp-command-space-rev*)
+(defun wesp-rewind (&key (unit 0))
+  "execute Rewind command based on TC-131 Rewind Flow Chart"
+  (%wesp-wait-controller-ready)
+  (%wesp-select-unit unit)
+  (%wesp-wait-unit-ready)
+  (%wesp-go *wesp-command-rewind*)
   t)
 
-(defun wesp-rewind ()
-  (%wesp-rewind-or-offline nil))
+;;; TEST FUNCTIONS
 
-(defun arrays-equal (arr1 arr2)
-     (cond
-      ((dotimes (i (array-length arr1))
-         (if (not (= (aref arr1 i) (aref arr2 i))) (return t))) nil)
-      (t)))
-
-(defun %wesp-test-write-read-compare-p (&key (count 256))
-   (let* ((arr-to-write (wesp-make-array count))
-          (arr-to-read (wesp-make-array count)))
-        (wesp-fill-array-orderly arr-to-write)
-        (wesp-rewind)
-        (wesp-write arr-to-write)
-        (wesp-rewind)
-        (wesp-read arr-to-read)
-        (arrays-equal arr-to-write arr-to-read)))
-
-(defun wesp-test-write-read-compare (&key (unit 0) (start 4) (times 12))
+(defun %wesp-test-print-array (arr)
   (fresh-line)
-  (wesp-select-unit unit)
-  (format t "Testing tape unit ~D with different record sizes...~%" unit)
-  (dotimes (i times)
-    (let ((count (lsh start i)))
-      (format t "~D " count)
-      (catch-all
-       (unwind-protect
-           (if (%wesp-test-write-read-compare-p :count count)
-               (format t "OK")
-               (format t "read != write"))
-         (fresh-line)))))
+  (dotimes (i (array-length arr)) (format t "~2,'0x " (aref arr i)))
+  nil)
+
+(defun %wesp-test-fill-array-orderly (arr &key (from 0) (to 256))
+  (dotimes (i (array-length arr)) (aset (+ (mod i (- to from)) from) arr i))
+  arr)
+
+(defun %wesp-test-fill-array-with (arr value)
+  (dotimes (i (array-length arr)) (aset value arr i))
+  arr)
+
+(defun %wesp-test-arrays-equal-p (arr1 arr2)
+  (assert (array-length arr1) (array-length arr2))
+  (dotimes (i (array-length arr1))
+    (if (not (eql (aref arr1 i) (aref arr2 i)))
+        (return-from %wesp-test-arrays-equal-p nil)))
   t)
 
-(comment
+(defun wesp-test-records (&key (unit 0) (min-record-length 4) (max-record-length 8192))
+  (fresh-line)
+  (format t "Testing tape unit ~D with different record sizes...~%" unit)
+  (do ((record-length min-record-length (lsh record-length 1)))
+      (nil)
+    (if (> record-length max-record-length) (return t))
+    (format t "~D " record-length)
+    (let* ((arr-to-write (wesp-make-array record-length))
+           (arr-to-read (wesp-make-array record-length)))
+      (%wesp-test-fill-array-orderly arr-to-write)
+      (wesp-rewind :unit unit)
+      (wesp-write arr-to-write :unit unit)
+      (wesp-rewind :unit unit)
+      (wesp-read arr-to-read :unit unit)
+      (if (%wesp-test-arrays-equal-p arr-to-write arr-to-read)
+          (format t "OK~%")
+          (format t "failed~%")))))
 
- (defun wesp-space-test (&optional (unit 0))
-   (let* ((arr-to-write (make-array 256 :type art-8b))
-          (arr-to-read (make-array 256 :type art-8b)))
-     ; initialize with ordered data (0x00-0xFF)
-     (dotimes (i (array-length arr-to-write)) (aset (mod i 256.) arr-to-write i))
-     (wesp-power-clear)
-     (wesp-rewind unit)
-     (wesp-write arr-to-write unit)
-     ; read back
-     (wesp-rewind unit)
-     (wesp-read count arr-to-read unit)))
+(defun wesp-test-files (&key (unit 0) (record-size 8))
+  (fresh-line)
+  (%wesp-select-unit unit)
+  (format t "Testing tape unit ~D...~%" unit)
+  (format t "Preparing buffers...~%")
+  (let ((record-1 (%wesp-test-fill-array-with (wesp-make-array record-size) (char-int 1)))
+        (record-2 (%wesp-test-fill-array-with (wesp-make-array record-size) (char-int 2)))
+        (record-3 (%wesp-test-fill-array-with (wesp-make-array record-size) (char-int 3)))
+        (record-4 (%wesp-test-fill-array-with (wesp-make-array record-size) (char-int 4)))
+        (buffer (wesp-make-array record-size)))
+    (wesp-rewind :unit unit)
+    (format t "Writing file-1 to tape...~%")
+    (wesp-write record-1 :unit unit)
+    (wesp-write record-2 :unit unit)
+    (wesp-write-eof :unit unit)
+    (format t "Writing file-2 to tape...~%")
+    (wesp-write record-3 :unit unit)
+    (wesp-write record-4 :unit unit)
+    (wesp-write-eof :unit unit)
+    ;; read-compare
+    (wesp-rewind :unit unit)
+    (wesp-read buffer :unit unit)
+    (%wesp-test-assert-arrays-equal buffer record-1)
+    (wesp-read buffer :unit unit)
+    (if (not (%wesp-mts-eof-p))
+        (format t "cannot find file-1 eof~%"))
 
- (defun wesp-fill-test (&optional (unit 0))
-   (let ((arr-to-write (make-array 4096 :type art-8b)))
-     ; initialize with ordered data (0x00-0xFF)
-     (dotimes (i (array-length arr-to-write)) (aset (mod i 256.) arr-to-write i))
-     (wesp-wait-controller-ready)
-     (wesp-power-clear)
-     (wesp-select-unit unit)
-     (wesp-wait-unit-ready)
-     (wesp-rewind)
-     (let* ((offset-from-page-start (%unibus-map-array arr-to-write))
-            (cma (+ #o140000 offset-from-page-start)))
-       (do-forever
-        (wesp-set-address cma)
-        (wesp-mtbrc (- (array-length arr-to-write)))
-        (wesp-go %wesp-command-write)
-        (wesp-wait-unit-ready)
-        (when (wesp-is-mtc-err) (return)))
-       (%unibus-unmap-array arr-to-write))))
+    (wesp-rewind :unit unit)
+    (wesp-read buffer :unit unit)
+    (wesp-read buffer :unit unit)
+    (if (not (%wesp-mts-eof-p))
+        (format t "cannot find file-2 eof~%"))
 
-)
+    ;; rewind then space one to read file-1/record-2
+    (wesp-rewind :unit unit)
+    (wesp-space-for 1 :unit unit)
+
+    ;; rewind then space 0 (max, filemark) to stop at eof
+    ;; then space 1 to read file-2/record-4
+    (wesp-rewind :unit unit)
+    (wesp-space-for 0 :unit unit)
+    (if (not (%wesp-mts-eof-p))
+        (format t "cannot find eof after space 0~%"))
+    (wesp-space-for 1 :unit unit)
+
+    (format t "Test completed.~%"))
+  t)
